@@ -1,6 +1,7 @@
 from .utils import chess_manager, GameContext
 import torch
 from huggingface_hub import hf_hub_download
+import importlib.util
 
 # Load the HuggingFace model once when the module loads
 print("Loading chess model from HuggingFace...")
@@ -10,7 +11,6 @@ model_path = hf_hub_download(repo_id="AubreeL/chess-bot", filename="chess_model.
 model_py_path = hf_hub_download(repo_id="AubreeL/chess-bot", filename="model.py")
 
 # Import the model architecture from the downloaded file
-import importlib.util
 spec = importlib.util.spec_from_file_location("chess_model", model_py_path)
 if spec is None or spec.loader is None:
     raise ImportError("Could not load model.py from HuggingFace")
