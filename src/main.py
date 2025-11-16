@@ -19,6 +19,8 @@ spec.loader.exec_module(chess_model_module)
 
 TinyPCN = chess_model_module.TinyPCN
 encode_board = chess_model_module.encode_board
+encode_move = chess_model_module.encode_move
+decode_move = chess_model_module.decode_move
 
 # Initialize and load the model
 model = TinyPCN(board_channels=18, policy_size=4672)
@@ -31,10 +33,8 @@ print("Model loaded successfully!")
 def test_func(ctx: GameContext):
     # This gets called every time the model needs to make a move
     # Return a python-chess Move object that is a legal move for the current position
-
-    print("Evaluating position with neural network...")
+    print("Evaluating position...")
     
-    # Get legal moves
     legal_moves = list(ctx.board.generate_legal_moves())
     if not legal_moves:
         ctx.logProbabilities({})
@@ -48,34 +48,42 @@ def test_func(ctx: GameContext):
     
     print(f"Position evaluation: {value.item():.4f}")
     
-    # Convert policy logits to probabilities for legal moves
-    # Note: The model outputs 4672 possible move encodings
-    # We need to map legal moves to their policy indices and get probabilities
-    
-    # For now, use softmax on policy logits and select based on legal moves
+    # Convert policy logits to probabilities
     policy_probs = torch.softmax(policy_logits[0], dim=0)
     
-    # Map legal moves to probabilities
-    # This is a simplified approach - you may need to implement proper move encoding
+    # Map legal moves to their policy probabilities using proper move encoding
     move_probs = {}
     for move in legal_moves:
-        # Get a heuristic probability (this is simplified)
-        # In a full implementation, you'd map each move to its policy index
-        move_uci = move.uci()
-        # Simple heuristic: use position in legal moves list
-        idx = hash(move_uci) % len(policy_probs)
-        move_probs[move] = policy_probs[idx].item()
+        try:
+            # Use the model's move encoding to get the correct policy index
+            move_idx = encode_move(move, ctx.board)
+            if 0 <= move_idx < len(policy_probs):
+                move_probs[move] = policy_probs[move_idx].item()
+            else:
+                # Fallback: assign very small probability to out-of-range moves
+                move_probs[move] = 1e-10
+        except Exception as e:
+            # If encoding fails, assign minimal probability
+            print(f"Warning: Failed to encode move {move.uci()}: {e}")
+            move_probs[move] = 1e-10
     
-    # Normalize probabilities
+    # Normalize probabilities to sum to 1.0
     total_prob = sum(move_probs.values())
     if total_prob > 0:
         move_probs = {move: prob / total_prob for move, prob in move_probs.items()}
+    else:
+        # Fallback: uniform distribution if all probabilities are zero
+        uniform_prob = 1.0 / len(legal_moves)
+        move_probs = {move: uniform_prob for move in legal_moves}
     
     # Log probabilities for analysis
     ctx.logProbabilities(move_probs)
     
-    # Select move with highest probability
-    best_move = max(move_probs.items(), key=lambda x: x[1])[0]
+    # Sort moves by probability 
+    sorted_moves = sorted(move_probs.items(), key=lambda x: x[1], reverse=True)
+    best_move = sorted_moves[0][0]
+    
+    print(f"Top 3 moves: {[(m.uci(), f'{p:.4f}') for m, p in sorted_moves[:3]]}")
     
     return best_move
 
@@ -84,4 +92,26 @@ def test_func(ctx: GameContext):
 def reset_func(ctx: GameContext):
     # This gets called when a new game begins
     # Should do things like clear caches, reset model state, etc.
-    pass
+    # Clear any logged probabilities for the previous game
+    try:
+        ctx.logProbabilities({})
+    except Exception:
+        print("reset_func: failed to clear move probabilities")
+
+    try:
+        if hasattr(torch, "cuda"):
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                print("reset_func: torch.cuda.empty_cache() failed or not available")
+    except Exception:
+        pass
+
+    # Keep the model in eval mode in case anything toggled it
+    try:
+        if "model" in globals() and hasattr(model, "eval"):
+            model.eval()
+    except Exception:
+        print("reset_func: failed to set model to eval()")
+
+    print("reset_func: model/game reset completed")
