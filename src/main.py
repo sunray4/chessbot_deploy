@@ -31,8 +31,10 @@ print("Model loaded successfully!")
 
 @chess_manager.entrypoint
 def test_func(ctx: GameContext):
-    # This gets called every time the model needs to make a move
-    # Return a python-chess Move object that is a legal move for the current position
+    """
+    Evaluate the current position and return the best move according to the model.
+    Uses efficient tensor operations and proper move filtering.
+    """
     print("Evaluating position...")
     
     legal_moves = list(ctx.board.generate_legal_moves())
@@ -48,42 +50,57 @@ def test_func(ctx: GameContext):
     
     print(f"Position evaluation: {value.item():.4f}")
     
-    # Convert policy logits to probabilities
+    # Convert policy logits to probabilities (more numerically stable)
     policy_probs = torch.softmax(policy_logits[0], dim=0)
     
-    # Map legal moves to their policy probabilities using proper move encoding
-    move_probs = {}
+    # Efficiently map legal moves to their policy probabilities
+    # Pre-allocate list for better performance
+    move_indices = []
+    valid_moves = []
+    
     for move in legal_moves:
         try:
-            # Use the model's move encoding to get the correct policy index
             move_idx = encode_move(move, ctx.board)
             if 0 <= move_idx < len(policy_probs):
-                move_probs[move] = policy_probs[move_idx].item()
-            else:
-                # Fallback: assign very small probability to out-of-range moves
-                move_probs[move] = 1e-10
+                move_indices.append(move_idx)
+                valid_moves.append(move)
         except Exception as e:
-            # If encoding fails, assign minimal probability
             print(f"Warning: Failed to encode move {move.uci()}: {e}")
-            move_probs[move] = 1e-10
+            # Skip invalid moves
     
-    # Normalize probabilities to sum to 1.0
-    total_prob = sum(move_probs.values())
-    if total_prob > 0:
-        move_probs = {move: prob / total_prob for move, prob in move_probs.items()}
-    else:
-        # Fallback: uniform distribution if all probabilities are zero
+    if not valid_moves:
+        # Fallback: uniform distribution if no valid moves found
         uniform_prob = 1.0 / len(legal_moves)
         move_probs = {move: uniform_prob for move in legal_moves}
+        ctx.logProbabilities(move_probs)
+        return legal_moves[0]
+    
+    # Extract probabilities for valid moves using tensor indexing (more efficient)
+    move_indices_tensor = torch.tensor(move_indices, dtype=torch.long)
+    move_probs_tensor = policy_probs[move_indices_tensor]
+    
+    # Create move probability dictionary
+    move_probs = {move: prob.item() for move, prob in zip(valid_moves, move_probs_tensor)}
+    
+    # Normalize probabilities to sum to 1.0 (handle floating point precision)
+    total_prob = sum(move_probs.values())
+    if total_prob > 1e-10:  # Avoid division by very small numbers
+        move_probs = {move: prob / total_prob for move, prob in move_probs.items()}
+    else:
+        # Fallback: uniform distribution if all probabilities are near zero
+        uniform_prob = 1.0 / len(valid_moves)
+        move_probs = {move: uniform_prob for move in valid_moves}
     
     # Log probabilities for analysis
     ctx.logProbabilities(move_probs)
     
-    # Sort moves by probability 
-    sorted_moves = sorted(move_probs.items(), key=lambda x: x[1], reverse=True)
-    best_move = sorted_moves[0][0]
+    # Select best move (highest probability)
+    best_move = max(move_probs.items(), key=lambda x: x[1])[0]
     
-    print(f"Top 3 moves: {[(m.uci(), f'{p:.4f}') for m, p in sorted_moves[:3]]}")
+    # Display top moves for debugging
+    sorted_moves = sorted(move_probs.items(), key=lambda x: x[1], reverse=True)
+    top_3 = [(m.uci(), f'{p:.4f}') for m, p in sorted_moves[:3]]
+    print(f"Top 3 moves: {top_3}")
     
     return best_move
 
